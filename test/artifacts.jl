@@ -1,7 +1,7 @@
 module ArtifactTests
 import ..Pkg # ensure we are using the correct Pkg
 
-using Test, Random, Pkg.Artifacts, Pkg.BinaryPlatforms, Pkg.PlatformEngines
+using Test, Random, Pkg.Artifacts, Base.BinaryPlatforms, Pkg.PlatformEngines
 import Pkg.Artifacts: pack_platform!, unpack_platform, with_artifacts_directory, ensure_all_artifacts_installed, extract_all_hashes
 using TOML, Dates
 import Base: SHA1
@@ -210,19 +210,19 @@ end
         ]
 
         # First, test the binding of things with various platforms and overwriting and such works properly
-        bind_artifact!(artifacts_toml, "foo_txt", hash; download_info=download_info, platform=Linux(:x86_64))
-        @test artifact_hash("foo_txt", artifacts_toml; platform=Linux(:x86_64)) == hash
-        @test artifact_hash("foo_txt", artifacts_toml; platform=MacOS()) == nothing
-        @test_throws ErrorException bind_artifact!(artifacts_toml, "foo_txt", hash2; download_info=download_info, platform=Linux(:x86_64))
-        bind_artifact!(artifacts_toml, "foo_txt", hash2; download_info=download_info, platform=Linux(:x86_64), force=true)
-        bind_artifact!(artifacts_toml, "foo_txt", hash; download_info=download_info, platform=Windows(:i686))
-        @test artifact_hash("foo_txt", artifacts_toml; platform=Linux(:x86_64)) == hash2
-        @test artifact_hash("foo_txt", artifacts_toml; platform=Windows(:i686)) == hash
-        @test ensure_artifact_installed("foo_txt", artifacts_toml; platform=Linux(:x86_64)) == artifact_path(hash2)
-        @test ensure_artifact_installed("foo_txt", artifacts_toml; platform=Windows(:i686)) == artifact_path(hash)
+        bind_artifact!(artifacts_toml, "foo_txt", hash; download_info=download_info, platform=Platform("x86_64", "linux"))
+        @test artifact_hash("foo_txt", artifacts_toml; platform=Platform("x86_64", "linux")) == hash
+        @test artifact_hash("foo_txt", artifacts_toml; platform=Platform("x86_64", "macos")) == nothing
+        @test_throws ErrorException bind_artifact!(artifacts_toml, "foo_txt", hash2; download_info=download_info, platform=Platform("x86_64", "linux"))
+        bind_artifact!(artifacts_toml, "foo_txt", hash2; download_info=download_info, platform=Platform("x86_64", "linux"), force=true)
+        bind_artifact!(artifacts_toml, "foo_txt", hash; download_info=download_info, platform=Platform("i686", "windows"))
+        @test artifact_hash("foo_txt", artifacts_toml; platform=Platform("x86_64", "linux")) == hash2
+        @test artifact_hash("foo_txt", artifacts_toml; platform=Platform("i686", "windows")) == hash
+        @test ensure_artifact_installed("foo_txt", artifacts_toml; platform=Platform("x86_64", "linux")) == artifact_path(hash2)
+        @test ensure_artifact_installed("foo_txt", artifacts_toml; platform=Platform("i686", "windows")) == artifact_path(hash)
 
         # Next, check that we can get the download_info properly:
-        meta = artifact_meta("foo_txt", artifacts_toml; platform=Windows(:i686))
+        meta = artifact_meta("foo_txt", artifacts_toml; platform=Platform("i686", "windows"))
         @test meta["download"][1]["url"] == "http://google.com/hello_world"
         @test meta["download"][2]["sha256"] == "a"^64
     end
@@ -325,19 +325,94 @@ end
 
         # Install artifacts such that `c_simple` is not installed properly
         # because of the platform we requested, but `socrates` is.
-        ensure_all_artifacts_installed(artifacts_toml; platform=Linux(:powerpc64le))
+        ensure_all_artifacts_installed(artifacts_toml; platform=Platform("powerpc64le", "linux"))
 
         # Test that c_simple doesn't even show up
-        c_simple_hash = artifact_hash("c_simple", artifacts_toml; platform=Linux(:powerpc64le))
+        c_simple_hash = artifact_hash("c_simple", artifacts_toml; platform=Platform("powerpc64le", "linux"))
         @test c_simple_hash == nothing
 
         # Test that socrates shows up, but is not installed
-        socrates_hash = artifact_hash("socrates", artifacts_toml; platform=Linux(:powerpc64le))
+        socrates_hash = artifact_hash("socrates", artifacts_toml; platform=Platform("powerpc64le", "linux"))
         @test !artifact_exists(socrates_hash)
 
         # Test that collapse_the_symlink is installed
-        cts_hash = artifact_hash("collapse_the_symlink", artifacts_toml; platform=Linux(:powerpc64le))
+        cts_hash = artifact_hash("collapse_the_symlink", artifacts_toml; platform=Platform("powerpc64le", "linux"))
         @test artifact_exists(cts_hash)
+    end
+
+    # Ensure that platform augmentation hooks work.  We will switch between two arbitrary artifacts for this,
+    # by inspecting an environment variable in our package hook.
+    engaged_hash = SHA1("a5f8161ca1ab2e94fedd3578586fe06d7906177c")
+    engaged_url = "https://github.com/JuliaBinaryWrappers/HelloWorldGo_jll.jl/releases/download/HelloWorldGo-v1.0.4+0/HelloWorldGo.v1.0.4.aarch64-linux-musl.tar.gz"
+    engaged_sha256 = "9b66d6b02a370d0170a8c217a872cd1f3d53de267d4e63c22a40b49f04367f8a"
+    disengaged_hash = SHA1("ea8ea92ecd57aa602d254ca6c637309642202768")
+    disengaged_url = "https://github.com/JuliaBinaryWrappers/HelloWorldGo_jll.jl/releases/download/HelloWorldGo-v1.0.4+0/HelloWorldGo.v1.0.4.i686-w64-mingw32.tar.gz"
+    disengaged_sha256 = "5c96a327fc6f0dc71d533373bc6cc6719a1e477c72319b800f29abf1b1e7d812"
+    for flooblecrank_status in ("engaged", "disengaged")
+        # Ensure that they're both missing at first so tests can fail properly
+        temp_pkg_dir() do project_path
+            aph_path = joinpath(project_path, "AugmentedPlatformHook")
+            copy_test_package(project_path, "AugmentedPlatformHook")
+
+            # Bind both "engaged" and "disengaged" variants of our `gooblebox` artifact to generate an Artifacts.toml file
+            artifacts_toml = joinpath(aph_path, "Artifacts.toml")
+            engaged_platform = HostPlatform()
+            engaged_platform["flooblecrank"] = "engaged"
+            Pkg.Artifacts.bind_artifact!(
+                artifacts_toml,
+                "gooblebox",
+                engaged_hash;
+                download_info = [(engaged_url, engaged_sha256)],
+                platform = engaged_platform,
+            )
+            disengaged_platform = HostPlatform()
+            disengaged_platform["flooblecrank"] = "disengaged"
+            Pkg.Artifacts.bind_artifact!(
+                artifacts_toml,
+                "gooblebox",
+                disengaged_hash;
+                download_info = [(disengaged_url, disengaged_sha256)],
+                platform = disengaged_platform,
+            )
+
+            Pkg.activate(aph_path)
+            add_this_pkg()
+            if flooblecrank_status == "engaged"
+                true_hash = engaged_hash
+                false_hash = disengaged_hash
+            else
+                true_hash = disengaged_hash
+                false_hash = engaged_hash
+            end
+
+            # Instantiate with this environment variable, to install the proper one
+            withenv("FLOOBLECRANK" => flooblecrank_status) do
+                Pkg.instantiate()
+                @test isdir(artifact_path(true_hash))
+                @test !isdir(artifact_path(false_hash))
+            end
+
+            # Manual test that artifact is installed by instantiate()
+            artifacts_toml = joinpath(aph_path, "Artifacts.toml")
+            p = HostPlatform()
+            p["flooblecrank"] = flooblecrank_status
+            flooblecrank_hash = artifact_hash("gooblebox", artifacts_toml; platform=p)
+            @test flooblecrank_hash == true_hash
+            @test artifact_exists(flooblecrank_hash)
+
+            # Test that if we load the package, it knows how to find its own artifact,
+            # because even the `@artifact_str` macro knows how to make use of the hook.
+            cmd = setenv(`$(Base.julia_cmd()) --color=yes --project=$(aph_path) -e 'using AugmentedPlatformHook; print(get_artifact_dir("gooblebox"))'`,
+                         "JULIA_DEPOT_PATH" => join(Base.DEPOT_PATH, ":"),
+                         "FLOOBLECRANK" => flooblecrank_status)
+            using_output = chomp(String(read(cmd)))
+            @test artifact_path(true_hash) == using_output
+
+            mkpath("/tmp/foo/$(flooblecrank_status)")
+            rm("/tmp/foo/$(flooblecrank_status)"; recursive=true, force=true)
+            cp(project_path, "/tmp/foo/$(flooblecrank_status)")
+            cp(Base.DEPOT_PATH[1], "/tmp/foo/$(flooblecrank_status)/depot")
+        end
     end
 end
 

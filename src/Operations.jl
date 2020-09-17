@@ -643,25 +643,55 @@ function download_artifacts(ctx::Context, pkgs::Vector{PackageSpec}; platform::A
     return download_artifacts(ctx, pkg_roots; platform=platform, verbose=verbose)
 end
 
+"""
+    load_pkg_hook(hook_path::String)
+
+Given a path to a hook file (which should end in a function definition) include
+it into an anonymous module and return that function.
+"""
+function load_pkg_hook(hook_path::String)
+    m = Module(gensym())
+    f = Base.include(m, hook_path)::Function
+
+    # Because this function will most likely be used in an old world age,
+    # we will do our caller a solid and auto-invokelatest for it here:
+    return (args...) -> Base.invokelatest(f, args...)
+end
+
 function download_artifacts(ctx::Context, pkg_roots::Vector{String}; platform::AbstractPlatform=HostPlatform(),
                             verbose::Bool=false)
     # List of Artifacts.toml files that we're going to download from
-    artifacts_tomls = String[]
+    artifacts_tomls = Tuple{String,Function}[]
 
     for path in pkg_roots
         # Check to see if this package has an (Julia)Artifacts.toml
         for f in artifact_names
             artifacts_toml = joinpath(path, f)
             if isfile(artifacts_toml)
-                push!(artifacts_tomls, artifacts_toml)
+                hook_path = joinpath(path, ".pkg", "platform_augmentation_hook.jl")
+                if isfile(hook_path)
+                    try
+                        hook = load_pkg_hook(hook_path)
+                        push!(artifacts_tomls, (artifacts_toml, hook))
+                    catch e
+                        @error("Malformed Pkg hook in $(hook_path), ignoring Artifacts.toml", exception=e)
+                    end
+                else
+                    push!(artifacts_tomls, (artifacts_toml, identity))
+                end
                 break
             end
         end
     end
 
     if !isempty(artifacts_tomls)
-        for artifacts_toml in artifacts_tomls
-            ensure_all_artifacts_installed(artifacts_toml; platform=platform, verbose=verbose, quiet_download=!(stderr isa Base.TTY))
+        for (artifacts_toml, platform_augmentation_hook) in artifacts_tomls
+            ensure_all_artifacts_installed(
+                artifacts_toml;
+                platform=platform_augmentation_hook(deepcopy(platform)),
+                verbose=verbose,
+                quiet_download=!(stderr isa Base.TTY)
+            )
             write_env_usage(artifacts_toml, "artifact_usage.toml")
         end
     end

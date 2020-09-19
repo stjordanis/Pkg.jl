@@ -670,12 +670,8 @@ function download_artifacts(ctx::Context, pkg_roots::Vector{String}; platform::A
             if isfile(artifacts_toml)
                 hook_path = joinpath(path, ".pkg", "platform_augmentation_hook.jl")
                 if isfile(hook_path)
-                    try
-                        hook = load_pkg_hook(hook_path)
-                        push!(artifacts_tomls, (artifacts_toml, hook))
-                    catch e
-                        @error("Malformed Pkg hook in $(hook_path), ignoring Artifacts.toml", exception=e)
-                    end
+                    hook = load_pkg_hook(hook_path)
+                    push!(artifacts_tomls, (artifacts_toml, hook))
                 else
                     push!(artifacts_tomls, (artifacts_toml, identity))
                 end

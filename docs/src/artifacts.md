@@ -227,3 +227,50 @@ Note that while that hash was previously overridden, it is no longer, and theref
 Most methods that are affected by overrides have the ability to ignore overrides by setting `honor_overrides=false` as a keyword argument within them.
 For UUID/name based overrides to work, `Artifacts.toml` files must be loaded with the knowledge of the UUID of the loading package.
 This is deduced automatically by the `artifacts""` string macro, however if you are for some reason manually using the `Pkg.Artifacts` API within your package and you wish to honor overrides, you must provide the package UUID to API calls like `artifact_meta()` and `ensure_artifact_installed()` via the `pkg_uuid` keyword argument.
+
+## Extending Platform Selection
+
+New in Julia 1.6, `Platform` objects can have extended attributes applied to them, allowing artifacts to be tagged with things such as CUDA driver version compatibility, microarchitectural compatibility, julia version compatibility and more!
+Note that this API is experimental and may change in the future.
+If you as a package developer find yourself needing this feature, please get in contact with us so this feature can evolve for the benefit of the whole ecosystem.
+In order to support artifact selection at `Pkg.add()` time, `Pkg` will look in the specially-named file `<project_root>/.pkg/platform_augmentation_hook.jl` and load the function defined within that file.
+An example hook definition file might look like:
+
+```julia
+using Base.BinaryPlatforms, Libdl
+
+function augment_platform!(p::Platform)
+    # Open libcuda explicitly, so it gets `dlclose()`'ed after we're done
+    dlopen("libcuda") do lib
+        # find symbol to ask for driver version; if we can't find it, just silently continue
+        cuDriverGetVersion = dlsym(lib, "cuDriverGetVersion"; throw_error=false)
+        if cuDriverGetVersion !== nothing
+            # Interrogate CUDA driver for driver version:
+            driverVersion = Ref{Cint}()
+            ccall(cuDriverGetVersion, UInt32, (Ptr{Cint},), driverVersion)
+
+            # Store only the major version
+            p["cuda"] = div(driverVersion, 1000)
+        end
+    end
+
+    # Return possibly-altered `Platform` object
+    return p
+end
+```
+
+In this hook definition, we open a system library (`libcuda`), search it for a symbol to give us the CUDA driver version, then embed the major version of that version number into the `cuda` property of the `Platform` object we are augmenting.
+Note that these hooks should clean up after themselves as much as possible.
+While it is not critical for this code to actually attempt to close the loaded library (as it will most likely be opened again by the CUDA package immediately after the package operations are completed) it is best practice to make hooks as lightweight and transparent as possible. 
+`Pkg` will run this function during package operations such as `add()`, `instantiate()` and `upgrade()`.
+Any time it would attempt to install an artifact for your package, it will first filter the typical `HostPlatform()` object through this platform agumentation hook, so that the appropriate artifact can be selected.
+In your own package, you should also perform the same filtering when using the `@artifact_str` macro, as follows:
+
+```julia
+include(".pkg/platform_augmentation_hook.jl")
+
+function __init__()
+    p = augment_platform!(HostPlatform())
+    global my_artifact_dir = @artifact_str("MyArtifact", p)
+end
+``` 
